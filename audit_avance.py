@@ -1389,10 +1389,10 @@ def audit_system(message_maj_threat_intel=None):
         statut = "🟠 Ce PC est SUSPECT"
         description = (f"{len(ALERTES_FORTES)} indicateur(s) fort(s) détecté(s) — "
                        "Des éléments sérieux méritent une vérification approfondie.")
-    elif SCORE >= 8:  # Score élevé mais sans indicateur fort = points à vérifier
+        elif SCORE >= 3:  # Des alertes existent mais pas d'indicateur fort = points à vérifier
         niveau_final = "VERT"
         statut = "✅ Ce PC est visiblement SAIN, mais quelques points à vérifier"
-        description = "Aucun indicateur fort, mais des anomalies mineures ont été relevées. Consulte le rapport."
+        description = "Aucun indicateur fort, mais des anomalies mineures ont été relevées. Consultez le rapport."
     else:
         niveau_final = "VERT"
         statut = "✅ Ce PC est SAIN"
