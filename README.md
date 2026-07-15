@@ -2,7 +2,7 @@
 📌 Présentation
 AuditSysteme est un outil d'audit de sécurité avancé pour Windows. Il analyse en profondeur votre système pour détecter des signes de compromission, des malwares ou des vulnérabilités, tout en restant accessible et rassurant pour l'utilisateur.
 
-SHA256          3BDAFD79C5D482B95CFBD17DB6D4822A551FC0CEBA391121B46F70A95A480B58
+SHA256          
 
 ✨ Fonctionnalités /Section	Description
 
