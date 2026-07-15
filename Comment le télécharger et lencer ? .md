@@ -1,4 +1,4 @@
-1. Cliquez sur **AuditSysteme_Paranomix.exe**.
+1. Cliquez sur **AuditSysteme_Paranomix.exe** (en revenant en arrière).
 
 2. Téléchargez le fichier en cliquant sur les **trois petits points** situés en haut de la page, à côté de **« History »**, puis sélectionnez **« Download »**.
 
