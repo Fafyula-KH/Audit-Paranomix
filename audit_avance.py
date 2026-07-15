@@ -1,7 +1,6 @@
 """
 AUDIT SYSTEME AVANCE - avec Threat Intel, diff Tâches Planifiées, AV/Pare-feu
-Auteur : Fafyula
-GitHub : https://github.com/Fafyula-KH
+Auteur : Paranomix
 """
 
 import os
@@ -19,9 +18,8 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
-AUTEUR = "Fafyula"
-GITHUB_URL = "https://github.com/Fafyula-KH"
-VERSION = "1.7 (ComHandler, WMI persistence, anomalies parent-enfant, analyse mémoire ciblée)"
+AUTEUR = "Paranomix"
+VERSION = "1.8 (fix résolution binaires sans chemin, exemption WMI SCM Event Log)"
 
 # --- Résolution du dossier de base : à côté du .py OU du .exe compilé ---
 if getattr(sys, "frozen", False):
@@ -32,7 +30,7 @@ else:
 REPORT = []
 SCORE = 0
 ALERTES = []
-ALERTES_FORTES = []  # indicateurs forts de compromission
+ALERTES_FORTES = []  # indicateurs quasi certains de compromission, pris individuellement
 CHEMINS_SIGNATURE = []
 
 SEUIL_CONNEXIONS_SUSPECTES = 15
@@ -41,7 +39,7 @@ PROCESSUS_SUSPECTS = ["mimikatz", "nc.exe", "plink.exe", "putty.exe",
                       "cobaltstrike", "beacon", "meterpreter", "empire"]
 
 THREAT_INTEL_PATH = BASE_DIR / "threat_intel.json"
-SEUIL_MAJ_HEURES = 24
+SEUIL_MAJ_HEURES = 24  # au-delà, la base est considérée périmée et une MAJ est tentée avant l'audit
 TASKS_BASELINE_PATH = BASE_DIR / "taches_baseline.json"
 
 # ==========================================
@@ -148,6 +146,9 @@ def charger_threat_intel():
     for cle, val in DEFAUT_TI.items():
         data.setdefault(cle, val)
 
+    # Nettoyage rétroactif : "\programdata\" seul était trop large (v1.2), casse tous
+    # les logiciels/drivers légitimes qui y écrivent (NVIDIA, imprimantes, etc.).
+    # On le retire même si il traine déjà dans un threat_intel.json généré avant ce fix.
     data["suspicious_path_fragments"] = [
         p for p in data.get("suspicious_path_fragments", []) if p.lower() != "\\programdata\\"
     ]
@@ -175,7 +176,7 @@ def charger_threat_intel():
 
 def mettre_a_jour_threat_intel():
     if not THREAT_INTEL_PATH.exists():
-        charger_threat_intel()
+        charger_threat_intel()  # crée le fichier par défaut
     with open(THREAT_INTEL_PATH, "r", encoding="utf-8") as f:
         data = json.load(f)
     data.setdefault("auto", dict(DEFAUT_TI["auto"]))
@@ -239,6 +240,7 @@ TI = charger_threat_intel()
 
 
 def verifier_connexion_internet(timeout=3):
+    """Test de connectivité léger (pas de DNS nécessaire, IP littérales)."""
     for hote in ("1.1.1.1", "8.8.8.8"):
         try:
             socket.create_connection((hote, 53), timeout=timeout)
@@ -249,6 +251,8 @@ def verifier_connexion_internet(timeout=3):
 
 
 def verifier_et_maj_threat_intel_si_necessaire(no_update=False):
+    """Vérifie la fraîcheur de la base et la met à jour si besoin avant l'audit.
+    Retourne un message de statut destiné à être inscrit dans le rapport (traçabilité)."""
     global TI
     auto = TI.get("auto", {})
     last_update = auto.get("last_update")
@@ -335,6 +339,8 @@ def contient_pattern_suspect(texte, patterns):
 
 
 def chemin_est_fiable(texte):
+    """True si le chemin correspond à un éditeur/emplacement de confiance connu
+    (ex: Windows Defender), pour éviter les faux positifs sur suspicious_path_fragments."""
     if not texte:
         return False
     t = texte.lower()
@@ -345,6 +351,8 @@ def chemin_est_fiable(texte):
 
 
 def nom_processus_suspect(nom_process):
+    """Vérifie les noms de process suspects avec limites de mot, pour éviter les faux
+    positifs comme 'nc.exe' qui matcherait en sous-chaîne dans 'megasync.exe' (...sy-NC.EXE)."""
     n = nom_process.lower()
     for suspect in PROCESSUS_SUSPECTS:
         s = suspect.lower()
@@ -355,6 +363,7 @@ def nom_processus_suspect(nom_process):
 
 
 def nom_aleatoire(nom):
+    """Heuristique simple : nom de fichier/tâche à consonance générée aléatoirement."""
     base = Path(nom).stem
     if len(base) < 10:
         return False
@@ -381,6 +390,8 @@ def get_powershell_json(cmd, timeout=15):
 
 
 def extraire_chemin_exe(commande):
+    """Extrait le chemin d'un exécutable depuis une ligne de commande de démarrage
+    (gère les guillemets et les chemins non quotés contenant des espaces)."""
     if not commande:
         return None
     c = commande.strip()
@@ -395,12 +406,16 @@ def extraire_chemin_exe(commande):
 
 
 def noter_chemin_pour_signature(commande):
+    """Ajoute le binaire référencé par cette commande à la liste des chemins dont on
+    vérifiera la signature Authenticode en fin d'audit (dédupliqué automatiquement)."""
     chemin = extraire_chemin_exe(commande)
     if chemin and chemin.lower().endswith((".exe", ".dll", ".sys")):
         CHEMINS_SIGNATURE.append(chemin)
 
 
 def decoder_product_state(state):
+    """Décodage indicatif du bitmask WSC (Windows Security Center). Non garanti à 100%
+    selon l'éditeur AV — vérifie manuellement en cas de doute."""
     try:
         state = int(state)
     except (TypeError, ValueError):
@@ -438,6 +453,8 @@ def parse_task_xml(contenu):
         elif tag in ("Command", "Arguments") and elem.text:
             result["commands"].append(elem.text.strip())
         elif tag == "ClassId" and elem.text:
+            # Action de type ComHandler (pas un .exe direct) : nécessite une résolution
+            # séparée du GUID vers son composant réel (voir resoudre_classid_com).
             result["com_class_ids"].append(elem.text.strip())
     return result
 
@@ -481,6 +498,8 @@ def scanner_taches_planifiees():
 _CACHE_PACKAGES_COM = None
 
 def _lister_packages_com():
+    """Liste (et met en cache) tous les packages enregistrés sous PackagedCom, pour
+    éviter de ré-énumérer le registre à chaque ClassId à résoudre."""
     global _CACHE_PACKAGES_COM
     if _CACHE_PACKAGES_COM is not None:
         return _CACHE_PACKAGES_COM
@@ -502,6 +521,10 @@ def _lister_packages_com():
 
 
 def resoudre_classid_com(class_id):
+    """Résout un ClassId COM (utilisé par les actions ComHandler des tâches planifiées,
+    invisibles pour une analyse basée sur les chemins de fichiers classiques) vers son
+    composant réel. Cherche d'abord dans le registre COM classique (CLSID\\...\\InprocServer32
+    /LocalServer32), puis dans PackagedCom (composants UWP/AppX modernes type SoftLanding)."""
     if platform.system() != "Windows":
         return None
     try:
@@ -553,9 +576,9 @@ def sauver_baseline_taches(snapshot):
 
 def ajouter_alerte(niveau, message, fort=False):
     global SCORE
-    SCORE += {"CRITIQUE": 6, "ELEVE": 3, "MOYEN": 1, "INFO": 0}[niveau]
+    SCORE += {"CRITIQUE": 10, "ELEVE": 5, "MOYEN": 2, "INFO": 1}[niveau]
     ALERTES.append(f"[{niveau}] {message}")
-    if fort and niveau == "CRITIQUE":
+    if fort:
         ALERTES_FORTES.append(message)
 
 def section(title):
@@ -587,6 +610,11 @@ def verifier_ip_privee(ip):
         return True
     return False
 
+# --- Détection de masquerade de processus système (MITRE ATT&CK T1036.005) ---
+# Technique de détection forensic classique : un vrai svchost.exe/lsass.exe/etc.
+# ne tourne JAMAIS ailleurs que dans les dossiers système Windows attendus. Un
+# malware qui se fait passer pour un de ces processus en le renommant se trahit
+# quasi systématiquement par son chemin d'exécution.
 _WINDIR = os.environ.get("WINDIR", r"C:\Windows").lower().rstrip("\\")
 _SYSTEM32 = _WINDIR + "\\system32"
 _SYSWOW64 = _WINDIR + "\\syswow64"
@@ -612,6 +640,8 @@ PROCESSUS_SYSTEME_CHEMINS_LEGITIMES = {
 
 
 def verifier_masquerade(nom_process, chemin_exe):
+    """Retourne True si un nom de processus système connu tourne depuis un
+    emplacement qui n'est pas son dossier légitime attendu."""
     nom_l = nom_process.lower()
     if nom_l not in PROCESSUS_SYSTEME_CHEMINS_LEGITIMES or not chemin_exe:
         return False
@@ -620,6 +650,10 @@ def verifier_masquerade(nom_process, chemin_exe):
     return not any(chemin_l.startswith(d) for d in dossiers_ok)
 
 
+# --- Anomalies parent-enfant de processus (classique DFIR / Autoruns / Process Explorer) ---
+# Un svchost.exe dont le parent n'est pas services.exe, ou une app Office qui lance un
+# shell/interpréteur, sont deux des signaux de compromission les plus fiables qui existent
+# car ils reposent sur l'architecture même de Windows, pas sur un pattern de texte.
 PARENT_ATTENDU = {
     "svchost.exe": {"services.exe"},
     "lsass.exe": {"wininit.exe"},
@@ -631,6 +665,7 @@ SHELLS_SUSPECTS_ENFANTS = {"cmd.exe", "powershell.exe", "pwsh.exe", "wscript.exe
 
 
 def verifier_anomalie_parent(nom_process, nom_parent):
+    """Retourne (est_anomalie, raison) pour les relations parent-enfant à risque connu."""
     if not nom_parent:
         return False, None
     nom_l = nom_process.lower()
@@ -646,10 +681,17 @@ def verifier_anomalie_parent(nom_process, nom_parent):
     return False, None
 
 
+# --- Analyse mémoire : régions exécutables privées non adossées à un fichier ---
+# Technique utilisée par les vrais outils de detection d'injection (Moneta, PE-sieve) :
+# une région MEM_PRIVATE (pas MEM_IMAGE, donc sans fichier source) ET exécutable dans
+# l'espace d'adressage d'un processus est la signature classique du shellcode, du
+# reflective DLL loading, ou du process hollowing. Coûteux -> réservé aux PID déjà
+# suspects par ailleurs (corroboration), jamais un scan aveugle de tous les processus.
 PIDS_A_ANALYSER_MEMOIRE = set()
 
 
 def scanner_regions_memoire_suspectes(pid, max_regions=50000):
+    """Retourne {'regions_suspectes': int, 'erreur': str|None} pour un PID donné."""
     if platform.system() != "Windows":
         return {"regions_suspectes": 0, "erreur": "Windows uniquement"}
     try:
@@ -669,7 +711,7 @@ def scanner_regions_memoire_suspectes(pid, max_regions=50000):
 
         MEM_COMMIT = 0x1000
         MEM_PRIVATE = 0x20000
-        PROTECTIONS_EXECUTABLES = {0x10, 0x20, 0x40, 0x80}
+        PROTECTIONS_EXECUTABLES = {0x10, 0x20, 0x40, 0x80}  # EXECUTE / _READ / _READWRITE / _WRITECOPY
         PROCESS_QUERY_INFORMATION = 0x0400
         PROCESS_VM_READ = 0x0010
 
@@ -700,14 +742,13 @@ def scanner_regions_memoire_suspectes(pid, max_regions=50000):
         return {"regions_suspectes": 0, "erreur": str(e)}
 
 # ==========================================
-# AUDIT SYSTEME - PARTIE 1
+# AUDIT SYSTEME
 # ==========================================
 
 def audit_system(message_maj_threat_intel=None):
     print("=" * 70)
     print("  🔍 AUDIT SYSTEME AVANCÉ - Threat Intel / Tâches / AV-Pare-feu")
     print(f"  Auteur : {AUTEUR}")
-    print(f"  GitHub : {GITHUB_URL}")
     print("=" * 70)
     ti_count = (len(TI.get("malicious_ips", [])) + len(TI.get("malicious_ip_ranges", []))
                 + len(TI.get("malicious_domains", [])))
@@ -721,7 +762,6 @@ def audit_system(message_maj_threat_intel=None):
         f"Machine : {platform.node()}",
         f"Utilisateur : {os.getlogin()}",
         f"Auteur du script : {AUTEUR}",
-        f"GitHub : {GITHUB_URL}",
         f"Version du script : {VERSION}",
     ]:
         add(i)
@@ -812,6 +852,8 @@ def audit_system(message_maj_threat_intel=None):
                 if mem > 30:
                     ajouter_alerte("MOYEN", f"Processus consommant beaucoup de mémoire: {name} (MEM: {mem:.1f}%)")
 
+                # Masquerade : un processus au nom système connu tournant hors de son
+                # dossier légitime est un très fort indicateur de compromission.
                 if verifier_masquerade(name, chemin_exe):
                     process_suspects.append(name)
                     pid_deja_suspect = True
@@ -820,6 +862,7 @@ def audit_system(message_maj_threat_intel=None):
                         f"MASQUERADE: '{name}' (PID {p.info['pid']}) tourne depuis un emplacement anormal: "
                         f"{chemin_exe} — un vrai '{name}' ne devrait jamais se trouver là", fort=True)
 
+                # Anomalie parent-enfant : svchost sans services.exe, Office qui lance un shell...
                 anomalie, raison_anomalie = verifier_anomalie_parent(name, nom_parent)
                 if anomalie:
                     process_suspects.append(name)
@@ -836,6 +879,8 @@ def audit_system(message_maj_threat_intel=None):
                         noter_chemin_pour_signature(chemin_exe)
                     ajouter_alerte("CRITIQUE", f"Ligne de commande suspecte pour {name} (PID {p.info['pid']}): motif '{motif}'")
 
+                # PID déjà suspect par un signal fiable -> candidat à l'analyse mémoire
+                # (coûteuse, donc jamais faite en aveugle sur tous les processus).
                 if pid_deja_suspect:
                     PIDS_A_ANALYSER_MEMOIRE.add((p.info['pid'], name))
             except Exception:
@@ -926,9 +971,19 @@ def audit_system(message_maj_threat_intel=None):
                     est_modifiee = rel in modifiees
                     suspect_nom = nom_aleatoire(Path(rel).name)
 
+                    # "Hidden=true" est l'état par défaut normal pour la quasi-totalité des
+                    # tâches internes du namespace Microsoft\Windows\ (ex: SvcRestartTask se
+                    # recrée périodiquement de façon 100% légitime dans le cadre du cycle de
+                    # licence Windows). Ne compter "hidden" comme signal suspect QUE en dehors
+                    # de ce namespace, pour éviter le bruit sur les tâches internes Microsoft
+                    # tout en gardant la vigilance sur les tâches tierces/utilisateur cachées.
                     est_namespace_microsoft = rel.lower().startswith("microsoft\\windows\\")
                     hidden_est_signal = info.get("hidden") and not est_namespace_microsoft
 
+                    # Actions ComHandler : invisibles pour une analyse par chemin de fichier
+                    # classique (pas de .exe direct dans le XML). On résout chaque ClassId
+                    # vers son composant réel — exactement la manip manuelle GUID -> registre
+                    # COM/PackagedCom -> éditeur, mais automatisée à chaque audit.
                     com_suspect = False
                     com_details = []
                     for cid in info.get("com_class_ids", []):
@@ -1261,6 +1316,11 @@ def audit_system(message_maj_threat_intel=None):
                     "$paths = '" + json_paths.replace("'", "''") + "' | ConvertFrom-Json; "
                     "$paths | ForEach-Object { "
                     "$p = [Environment]::ExpandEnvironmentVariables($_); "
+                    "if ($p -notmatch '[\\\\/]') { "
+                    "$candidats = @((Join-Path $env:WINDIR ('System32\\' + $p)), (Join-Path $env:WINDIR ('SysWOW64\\' + $p)), (Join-Path $env:WINDIR $p)); "
+                    "$trouve = $candidats | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1; "
+                    "if ($trouve) { $p = $trouve } "
+                    "} "
                     "if (Test-Path -LiteralPath $p) { "
                     "$sig = Get-AuthenticodeSignature -FilePath $p; "
                     "[PSCustomObject]@{Path=$p; Status=$sig.Status.ToString(); Signer=$sig.SignerCertificate.Subject} "
@@ -1289,26 +1349,29 @@ def audit_system(message_maj_threat_intel=None):
                             non_signes += 1
                             add(f"  🚨 {chemin} — signature INVALIDE/ALTÉRÉE ({statut})")
                             ajouter_alerte("CRITIQUE", f"Signature numérique invalide/altérée sur un binaire de démarrage: {chemin} ({statut})", fort=True)
-                        else:
+                        else:  # NotSigned, UnknownError, etc.
                             non_signes += 1
                             add(f"  ⚠️ {chemin} — NON SIGNÉ ({statut})")
-                            ajouter_alerte("MOYEN", f"Binaire de démarrage non signé: {chemin} — à vérifier manuellement")
+                            ajouter_alerte("MOYEN", f"Binaire de démarrage non signé: {chemin} — à vérifier manuellement (fréquent chez les logiciels freeware/indie légitimes, mais aussi chez les malwares)")
 
                     add(f"\nRésumé : {valides} signé(s), {non_signes} non signé(s)/invalide(s), {introuvables} introuvable(s)")
-                    add("Note : un logiciel non signé n'est pas forcément malveillant, mais mérite une vérification manuelle.")
+                    add("Note : un logiciel non signé n'est pas forcément malveillant (beaucoup de petits éditeurs "
+                        "indépendants ne signent pas leurs binaires), mais mérite une vérification manuelle de "
+                        "l'origine si tu ne reconnais pas l'éditeur ou le chemin.")
         except Exception as e:
             add(f"Erreur : {e}")
     else:
         add("Fonction Windows uniquement")
 
     # ======================================
-    # 11 - Analyse mémoire des processus déjà suspects
+    # 11 - Analyse mémoire des processus déjà suspects (injection/shellcode)
     # ======================================
     section("[11] ANALYSE MEMOIRE (régions exécutables non adossées à un fichier)")
     if platform.system() == "Windows":
         try:
             if not PIDS_A_ANALYSER_MEMOIRE:
-                add("Aucun processus signalé par ailleurs — pas d'analyse mémoire nécessaire.")
+                add("Aucun processus signalé par ailleurs — pas d'analyse mémoire nécessaire "
+                    "(technique réservée aux processus déjà suspects, pour rester rapide et fiable).")
             else:
                 add(f"{len(PIDS_A_ANALYSER_MEMOIRE)} processus déjà suspect(s) — analyse de leur espace mémoire...")
                 for pid, nom in PIDS_A_ANALYSER_MEMOIRE:
@@ -1320,16 +1383,20 @@ def audit_system(message_maj_threat_intel=None):
                             f"exécutable(s) SANS fichier source (signature d'injection/shellcode)")
                         ajouter_alerte("CRITIQUE",
                             f"Régions mémoire exécutables non adossées à un fichier dans '{nom}' (PID {pid}): "
-                            f"{resultat['regions_suspectes']} région(s) — forte suspicion d'injection de code", fort=True)
+                            f"{resultat['regions_suspectes']} région(s) — combiné à un autre signal déjà détecté sur "
+                            f"ce processus, forte suspicion d'injection de code", fort=True)
                     else:
                         add(f"  ✅ {nom} (PID {pid}) — aucune région mémoire suspecte détectée")
+                add("\nNote : cette analyse ne porte que sur les processus déjà signalés ailleurs dans l'audit "
+                    "(masquerade, ligne de commande, anomalie parent-enfant...). Ce n'est pas un scan mémoire "
+                    "complet façon Volatility, mais un indice de corroboration ciblé.")
         except Exception as e:
             add(f"Erreur : {e}")
     else:
         add("Fonction Windows uniquement")
 
     # ======================================
-    # 12 - Abonnements WMI (persistance fileless)
+    # 12 - Abonnements WMI (persistance fileless, MITRE T1546.003)
     # ======================================
     section("[12] ABONNEMENTS WMI (persistance sans fichier)")
     if platform.system() == "Windows":
@@ -1353,50 +1420,74 @@ def audit_system(message_maj_threat_intel=None):
 
             filtres, consommateurs, liaisons = normaliser(filtres), normaliser(consommateurs), normaliser(liaisons)
 
+            # "SCM Event Log Filter/Consumer" est un abonnement WMI natif Windows présent
+            # par défaut sur la quasi-totalité des installations (le Service Control Manager
+            # journalise les changements d'état des services). Les guides de chasse WMI
+            # (SANS/DFIR) le citent explicitement comme le bruit par défaut à exclure — sans
+            # cette exemption, l'alerte se déclencherait sur toutes les machines, tout le temps.
+            NOMS_WMI_FIABLES = {"scm event log filter", "scm event log consumer"}
+
+            def est_fiable_wmi(nom):
+                return bool(nom) and nom.strip().lower() in NOMS_WMI_FIABLES
+
+            filtres_suspects = [f for f in filtres if not est_fiable_wmi(f.get("Name"))]
+            consommateurs_suspects = [c for c in consommateurs if not est_fiable_wmi(c.get("Name"))]
+
             if not filtres and not consommateurs and not liaisons:
-                add("✅ Aucun abonnement WMI permanent détecté.")
-            else:
-                add(f"⚠️ {len(filtres)} filtre(s), {len(consommateurs)} consommateur(s), {len(liaisons)} liaison(s) WMI détecté(s).")
-                add("Note : certains outils de gestion d'entreprise légitimes utilisent ce mécanisme.")
+                add("✅ Aucun abonnement WMI permanent détecté (état normal sur la grande majorité des postes).")
+            elif not filtres_suspects and not consommateurs_suspects:
+                add("✅ Seul le composant natif Windows 'SCM Event Log' détecté — normal et attendu, aucune alerte.")
                 for f in filtres:
-                    add(f"  Filtre: {f.get('Name')} — requête: {str(f.get('Query'))[:150]}")
+                    add(f"  Filtre (natif Windows): {f.get('Name')} — requête: {str(f.get('Query'))[:150]}")
+            else:
+                add(f"⚠️ {len(filtres_suspects)} filtre(s), {len(consommateurs_suspects)} consommateur(s) non reconnu(s) "
+                    f"comme natifs Windows, sur {len(filtres)} filtre(s)/{len(liaisons)} liaison(s) au total.")
+                add("Note : certains outils de gestion d'entreprise légitimes (Intune, SCCM, certains antivirus) "
+                    "utilisent ce mécanisme. Une présence n'est pas automatiquement malveillante, mais c'est rare "
+                    "sur un poste personnel/de production standard — vérifie chaque entrée à la main.")
+                for f in filtres:
+                    tag = " (natif Windows, RAS)" if est_fiable_wmi(f.get("Name")) else ""
+                    add(f"  Filtre: {f.get('Name')}{tag} — requête: {str(f.get('Query'))[:150]}")
                 for c in consommateurs:
                     detail = c.get("CommandLineTemplate") or c.get("ScriptText") or ""
-                    add(f"  Consommateur: {c.get('Name')} — action: {str(detail)[:150]}")
+                    tag = " (natif Windows, RAS)" if est_fiable_wmi(c.get("Name")) else ""
+                    add(f"  Consommateur: {c.get('Name')}{tag} — action: {str(detail)[:150]}")
                 for b in liaisons:
                     add(f"  Liaison: {b.get('Filter')} -> {b.get('Consumer')}")
-                ajouter_alerte("ELEVE", f"{len(filtres)} abonnement(s) WMI permanent(s) détecté(s) — persistance "
-                                        f"fileless possible, à vérifier manuellement")
+                if filtres_suspects or consommateurs_suspects:
+                    ajouter_alerte("ELEVE", f"{len(filtres_suspects)} filtre(s)/{len(consommateurs_suspects)} "
+                                            f"consommateur(s) WMI non reconnu(s) comme natifs — persistance "
+                                            f"fileless possible, à vérifier manuellement")
         except Exception as e:
             add(f"Erreur : {e}")
     else:
         add("Fonction Windows uniquement")
 
     # ======================================
-    # VERDICT FINAL AVEC SEUILS RESSERRÉS
+    # SCORE FINAL
     # ======================================
     section("📊 DIAGNOSTIC FINAL")
     add(f"Score de risque: {SCORE}")
+    if ALERTES_FORTES:
+        add(f"Indicateurs forts corroborés : {len(ALERTES_FORTES)}")
 
-    # 4 niveaux de verdict avec des seuils stricts
-    if len(ALERTES_FORTES) >= 3:  # Au moins 3 indicateurs forts = compromission probable
+    # Verdict basé sur la corroboration d'indicateurs plutôt que sur la seule somme
+    # de points : un indicateur fort avéré (match threat intel, signature altérée,
+    # détournement DNS, masquerade de processus système, Winlogon modifié...) pèse
+    # bien plus qu'un empilement de signaux faibles individuellement peu fiables.
+    if ALERTES_FORTES:
         niveau_final = "ROUGE"
-        statut = "🔴 Ce PC est INFECTÉ"
+        statut = "POTENTIELLEMENT INFECTÉ"
         description = (f"{len(ALERTES_FORTES)} indicateur(s) fort(s) corroboré(s) détecté(s) — "
-                       "Une compromission est très probable. Une analyse approfondie est URGENTE.")
-    elif ALERTES_FORTES:  # 1 ou 2 indicateurs forts = suspect
+                       "une vérification manuelle approfondie est fortement recommandée.")
+    elif SCORE >= 6:
         niveau_final = "ORANGE"
-        statut = "🟠 Ce PC est SUSPECT"
-        description = (f"{len(ALERTES_FORTES)} indicateur(s) fort(s) détecté(s) — "
-                       "Des éléments sérieux méritent une vérification approfondie.")
-        elif SCORE >= 3:  # Des alertes existent mais pas d'indicateur fort = points à vérifier
-        niveau_final = "VERT"
-        statut = "✅ Ce PC est visiblement SAIN, mais quelques points à vérifier"
-        description = "Aucun indicateur fort, mais des anomalies mineures ont été relevées. Consultez le rapport."
+        statut = "SUSPECT / A VERIFIER"
+        description = "Des éléments méritent une vérification, sans indicateur de compromission avéré."
     else:
         niveau_final = "VERT"
-        statut = "✅ Ce PC est SAIN"
-        description = "Aucun élément suspect détecté lors de cet audit."
+        statut = "SAIN"
+        description = "Aucun signe de compromission détecté sur cet audit."
 
     add(f"\n{statut}")
     add(f"  {description}")
@@ -1413,25 +1504,28 @@ def audit_system(message_maj_threat_intel=None):
 
 
 def activer_ansi_console():
+    """Active l'interprétation des séquences ANSI dans la console Windows (nécessaire
+    pour les couleurs sur cmd.exe classique ; Windows Terminal/PowerShell l'ont déjà)."""
     if platform.system() != "Windows":
         return
     try:
         import ctypes
         kernel32 = ctypes.windll.kernel32
-        handle = kernel32.GetStdHandle(-11)
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
         mode = ctypes.c_uint32()
         kernel32.GetConsoleMode(handle, ctypes.byref(mode))
-        kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+        kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
     except Exception:
         pass
 
 
 def afficher_rectangle_verdict(niveau, titre, sous_texte):
+    """Affiche un bloc plein coloré dans la console : vert=sain, orange=suspect, rouge=potentiellement infecté."""
     activer_ansi_console()
     couleurs = {
-        "VERT": ("42", "30"),
-        "ORANGE": ("48;5;208", "30"),
-        "ROUGE": ("41", "97"),
+        "VERT": ("42", "30"),     # fond vert, texte noir
+        "ORANGE": ("48;5;208", "30"),  # fond orange (256 couleurs), texte noir
+        "ROUGE": ("41", "97"),    # fond rouge, texte blanc
     }
     bg, fg = couleurs.get(niveau, ("40", "97"))
     lignes = [titre, sous_texte]
@@ -1448,6 +1542,8 @@ def afficher_rectangle_verdict(niveau, titre, sous_texte):
 
 
 def get_desktop_dir():
+    """Renvoie le Bureau de l'utilisateur courant. Fallback sur BASE_DIR si introuvable
+    (ex: profil Bureau redirigé, ou environnement non standard)."""
     userprofile = os.environ.get("USERPROFILE")
     if userprofile:
         desktop = Path(userprofile) / "Desktop"
@@ -1480,6 +1576,7 @@ def save_report(statut):
         with open(filename, "w", encoding="utf-8") as f:
             f.write("\n".join(REPORT))
     except Exception as e:
+        # Fallback si le Bureau n'est pas accessible en écriture pour une raison quelconque
         filename = BASE_DIR / f"Rapport d'audit N°{n}.txt"
         with open(filename, "w", encoding="utf-8") as f:
             f.write("\n".join(REPORT))
@@ -1496,10 +1593,11 @@ if __name__ == "__main__":
     message_maj = None
 
     if "--update" in sys.argv:
+        # Forçage manuel explicite, indépendant du seuil de 24h
         mettre_a_jour_threat_intel()
         TI = charger_threat_intel()
         message_maj = "Mise à jour forcée manuellement via --update juste avant cet audit."
-        if len(sys.argv) == 2:
+        if len(sys.argv) == 2:  # rien d'autre demandé, on s'arrête après la MAJ
             input("\nAppuyez sur ENTRÉE pour fermer...")
             sys.exit(0)
     else:
