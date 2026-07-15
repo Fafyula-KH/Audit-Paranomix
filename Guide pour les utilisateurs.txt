@@ -14,7 +14,7 @@ Est-ce que c'est sûr de le lancer ?
 Trois façons de vérifier avant de faire confiance, du plus simple au plus poussé :
 
 
-Compare le hash SHA-256 du fichier que tu as reçu avec celui publié sur ce dépôt.
+Compare le hash SHA-256 du fichier que tu as reçu avec celui publié sur ce dépôt : https://github.com/Fafyula-KH/Audit-Paranomix/blob/main/README.md
 
 S'il ne correspond pas à celui affiché ici, ne le lance pas et préviens-moi.
 
