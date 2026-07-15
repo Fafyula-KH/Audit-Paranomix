@@ -271,28 +271,22 @@ Sans privilèges administrateur, certaines informations peuvent être incomplèt
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-📋 Prérequis
+📋 Prérequis :
 
 💻 Systèmes compatibles : Windows
 
 🔑 Droits :
 Administrateur recommandé
 
-💾 Espace disque :
-Environ 50 MB
+💾 Poids du .exe : 8,85 MO
 
 📦 Dépendances :
 Intégrées dans l'exécutable
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-👨‍💻 Auteurs :
+👨‍💻 Auteurs : Fafyula
 
-🐍 Moteur original Python :
-Fafyula
+🐍 Moteur original Python : Fafyula
 
-💻 Portage PowerShell :
-Fafyula
-
-🔗 GitHub :
-https://github.com/Fafyula-KH/Audit-Paranomix
+💻 Portage PowerShell : Fafyula
